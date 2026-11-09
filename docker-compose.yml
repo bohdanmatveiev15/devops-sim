@@ -1,0 +1,65 @@
+name: finsim
+
+# Values come from the .env file next to this file.
+# Each service gets only its own variables, so changing a load generator
+# setting does not recreate the database or the application.
+x-app-environment: &app-environment
+  POSTGRES_HOST: ${POSTGRES_HOST}
+  POSTGRES_PORT: ${POSTGRES_PORT}
+  POSTGRES_DB: ${POSTGRES_DB}
+  POSTGRES_USER: ${POSTGRES_USER}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  REDIS_HOST: ${REDIS_HOST}
+  REDIS_PORT: ${REDIS_PORT}
+  REDIS_QUEUE: ${REDIS_QUEUE}
+  LOG_LEVEL: ${LOG_LEVEL}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  redis:
+    image: redis:7
+
+  payments-api:
+    build: ./payments-api
+    environment: *app-environment
+    depends_on:
+      - postgres
+      - redis
+
+  ledger-worker:
+    build: ./ledger-worker
+    environment: *app-environment
+    depends_on:
+      - postgres
+      - redis
+
+  nginx:
+    image: nginx:1.27
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - payments-api
+
+  load-generator:
+    build: ./load-generator
+    environment:
+      API_URL: ${API_URL}
+      ENABLED: ${ENABLED}
+      RPS: ${RPS}
+      LOG_LEVEL: ${LOG_LEVEL}
+    depends_on:
+      - nginx
+
+volumes:
+  postgres-data:
