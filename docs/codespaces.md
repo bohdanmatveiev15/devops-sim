@@ -25,15 +25,19 @@ everything in them is lost, so push your work.
 
 | What                                     | Stop | Rebuild                     |
 | ---------------------------------------- | ---- | --------------------------- |
-| Repository and `.env` in `/workspaces`   | Yes  | Yes                         |
+| Repository and env files in `/workspaces` | Yes  | Yes                        |
 | Simulation data in `/workspaces/.devops-sim` | Yes  | Yes                     |
 | Simulation SSH key in `/workspaces/.devops-sim/ssh` | Yes | Yes                 |
+| Server host keys, `ops-admin` password, deployment copies, `chaos` state in `/workspaces/.devops-sim` | Yes | Yes |
+| `~/.ssh/config` entries for `bastion` and `legacy-vm-01` | Yes | Restored by the setup script |
 | Home directory, including `~/.ssh` and `gh` or Claude Code logins | Yes | No     |
 | Running processes and containers         | No   | No                          |
 | Docker images and volumes (FinSim database) | Yes | Not guaranteed            |
 
-After a start, run `make up` again, because containers do not start by themselves. Treat the
-FinSim database as disposable across a rebuild.
+After a start, run `make up` and `make infra-up` again, because containers do not start by
+themselves. Treat the FinSim databases as disposable across a rebuild. After a rebuild, `ssh
+bastion` works again without host key warnings, because the host keys are stable and kept in
+`/workspaces/.devops-sim/hostkeys`.
 
 ### Interrupted `sim` sessions
 
@@ -48,7 +52,10 @@ interruption, and `sim stop` or the next `sim start` closes the session.
 3. On the line **FinSim prod** (port 8080), select the globe icon. Add a path such as `/health`
    to the address if you need one.
 
-Port 8081 is reserved for **FinSim staging**, which does not exist yet.
+Run `make up env=staging` to start staging, then open **FinSim staging** (port 8081) the same
+way. Stop it with `make down env=staging` when you are done, to save memory.
+
+SSH to `bastion` uses port 2223 on localhost. Port 2222 belongs to the Codespaces SSH server.
 
 Ports are private by default: only your signed-in GitHub account can open them. Keep the
 visibility as **Private**, and do not change it in the Ports tab.
@@ -110,4 +117,6 @@ unset GITHUB_TOKEN
 gh project list --owner "$GITHUB_USER"
 ```
 
-The login is stored in the home directory, so repeat it after a rebuild.
+The login is stored in the home directory, so repeat it after a rebuild. Project commands need
+this login even when the rest of `gh` works, so always run them with `env -u GITHUB_TOKEN` or in
+a terminal where you ran `unset GITHUB_TOKEN`.

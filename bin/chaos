@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+#
+# chaos - incident engine for the FinSim simulation.
+# Data lives in $SIM_HOME (default ~/.devops-sim/).
+# Exit codes: 0 success, 1 wrong usage, 2 state error.
+#
+# A scenario file holds one base64-encoded scenario per line. A decoded scenario is a
+# bash script that defines:
+#   SCENARIO_TITLE    short title, shown only by chaos reveal
+#   SCENARIO_DETAILS  what happened, shown only by chaos reveal
+#   MESSAGE_CHANNEL   chat channel of the complaint, without #
+#   MESSAGE_AUTHOR    who complains
+#   MESSAGE_TEXT      the symptom, without the cause
+#   scenario_ready()  optional: returns 0 if the scenario can run now
+#   scenario_break()  starts the incident
+#   scenario_fix()    removes everything scenario_break created; safe to run repeatedly
+# Scenario functions run from the repository root with these variables set: SIM_HOME,
+# FINSIM_REPO and CHAOS_WORK_DIR (a private directory for backups and state).
+
+export LC_ALL=C
+
+SIM_DIR="${SIM_HOME:-$HOME/.devops-sim}"
+CHAOS_DIR="$SIM_DIR/chaos"
+ARMED_FILE="$CHAOS_DIR/armed"
+ACTIVE_FILE="$CHAOS_DIR/active"
+ACTIVE_MESSAGE_FILE="$CHAOS_DIR/active_message"
+RESOLVED_FILE="$CHAOS_DIR/resolved"
+LAST_TRIGGER_FILE="$CHAOS_DIR/last_trigger_date"
+WORK_DIR="$CHAOS_DIR/work"
+LOG_FILE="$SIM_DIR/chaos.log"
+INBOX_DIR="$SIM_DIR/inbox"
+
+REPO_ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+SCENARIOS_FILE="$REPO_ROOT/chaos/scenarios.dat"
+
+MIN_SESSION_SECONDS="${SIM_TEST_CHAOS_MIN_SESSION_SECONDS:-1800}"
+# One check per heartbeat, so the incident lands at a random minute after the minimum.
+TICK_ODDS="${SIM_TEST_CHAOS_ODDS:-45}"
+MIN_DELIVERY_SECONDS=300
+MAX_DELIVERY_SECONDS=900
+
+die_usage() {
+    echo "Usage: chaos $1" >&2
+    exit 1
+}
+
+die_state() {
+    echo "$1" >&2
+    exit 2
+}
+
+log_event() {
+    echo "$(date '+%F %T') $1" >>"$LOG_FILE"
+}
+
+incident_active() {
+    [ -s "$ACTIVE_FILE" ]
+}
+
+# Runs one function of an encoded scenario. Output is hidden so nothing gives it away.
+run_scenario() {
+    local encoded=$1 function_name=$2 debug_log=${CHAOS_DEBUG_LOG:-/dev/null}
+    mkdir -p "$WORK_DIR" || return 1
+    (
+        cd "$REPO_ROOT" || exit 1
+        export SIM_HOME="$SIM_DIR" FINSIM_REPO="$REPO_ROOT" CHAOS_WORK_DIR="$WORK_DIR"
+        eval "$(printf '%s' "$encoded" | base64 -d)"
+        if ! declare -F "$function_name" >/dev/null; then
+            # Only scenario_ready is optional.
+            [ "$function_name" = scenario_ready ]
+            exit
+        fi
+        "$function_name"
+    ) >>"$debug_log" 2>&1
+}
+
+scenario_field() {
+    (
+        eval "$(printf '%s' "$1" | base64 -d)" >/dev/null 2>&1
+        printf '%s' "${!2}"
+    )
+}
+
+valid_scenario() {
+    local decoded
+    decoded=$(printf '%s' "$1" | base64 -d 2>/dev/null) || return 1
+    grep -q 'scenario_break' <<<"$decoded" && grep -q 'scenario_fix' <<<"$decoded"
+}
+
+queue_complaint() {
+    local encoded=$1 now delay deliver name
+    now=$(date +%s)
+    delay=${SIM_INBOX_DELAY_SECONDS:-$((MIN_DELIVERY_SECONDS + RANDOM % (MAX_DELIVERY_SECONDS - MIN_DELIVERY_SECONDS + 1)))}
+    deliver=$((now + delay))
+    name="$deliver-$$.msg"
+    mkdir -p "$INBOX_DIR" || return 1
+    printf '[#%s] %s: %s\n' "$(scenario_field "$encoded" MESSAGE_CHANNEL)" \
+        "$(scenario_field "$encoded" MESSAGE_AUTHOR)" \
+        "$(scenario_field "$encoded" MESSAGE_TEXT)" >"$INBOX_DIR/$name" || return 1
+    echo "$name" >"$ACTIVE_MESSAGE_FILE"
+}
+
+# A complaint that has not arrived yet would describe an incident that is already over.
+drop_pending_complaint() {
+    [ -s "$ACTIVE_MESSAGE_FILE" ] || return 0
+    local name deliver
+    read -r name <"$ACTIVE_MESSAGE_FILE"
+    deliver=${name%%-*}
+    if [[ $deliver =~ ^[0-9]+$ ]] && [ "$deliver" -gt "$(date +%s)" ]; then
+        rm -f "$INBOX_DIR/$name"
+    fi
+    rm -f "$ACTIVE_MESSAGE_FILE"
+}
+
+# The active file is written first, so an interrupted break can still be fixed.
+start_incident() {
+    local encoded=$1 origin=$2
+    printf '%s\n' "$encoded" >"$ACTIVE_FILE" || return 1
+    rm -f "$RESOLVED_FILE"
+    rm -rf "$WORK_DIR"
+    if ! run_scenario "$encoded" scenario_break; then
+        run_scenario "$encoded" scenario_fix
+        rm -f "$ACTIVE_FILE"
+        rm -rf "$WORK_DIR"
+        log_event "incident failed to start ($origin)"
+        return 1
+    fi
+    queue_complaint "$encoded"
+    log_event "incident started ($origin)"
+}
+
+# Prints a ready scenario from the file in $1, in random order.
+pick_scenario() {
+    local file=$1 encoded
+    while IFS= read -r encoded; do
+        [ -n "$encoded" ] || continue
+        if run_scenario "$encoded" scenario_ready; then
+            printf '%s\n' "$encoded"
+            return 0
+        fi
+    done < <(shuf "$file")
+    return 1
+}
+
+cmd_arm() {
+    [ $# -eq 0 ] || die_usage "arm"
+    touch "$ARMED_FILE" || die_state "Cannot write $ARMED_FILE"
+    log_event "armed"
+    echo "armed"
+}
+
+cmd_disarm() {
+    [ $# -eq 0 ] || die_usage "disarm"
+    rm -f "$ARMED_FILE" || die_state "Cannot remove $ARMED_FILE"
+    log_event "disarmed"
+    echo "disarmed"
+}
+
+cmd_status() {
+    [ $# -eq 0 ] || die_usage "status"
+    if [ -f "$ARMED_FILE" ]; then
+        echo "armed"
+    else
+        echo "disarmed"
+    fi
+    if incident_active; then
+        echo "Active incident: yes"
+    else
+        echo "Active incident: no"
+    fi
+}
+
+cmd_run() {
+    [ $# -eq 1 ] || die_usage "run <file>"
+    [ -r "$1" ] && [ -f "$1" ] || die_usage "run <file> (the file must exist)"
+    incident_active && die_state "An incident is already active"
+
+    local encoded
+    while IFS= read -r encoded; do
+        [ -n "$encoded" ] || continue
+        valid_scenario "$encoded" || die_state "Invalid scenario file: $1"
+    done <"$1"
+
+    encoded=$(pick_scenario "$1") || die_state "No scenario in $1 can run now"
+    start_incident "$encoded" manual || die_state "The scenario failed to start"
+    echo "Incident started"
+}
+
+cmd_resolved() {
+    [ $# -eq 0 ] || die_usage "resolved"
+    incident_active || die_state "No active incident"
+    drop_pending_complaint
+    mv "$ACTIVE_FILE" "$RESOLVED_FILE" || die_state "Cannot write $RESOLVED_FILE"
+    log_event "incident marked resolved"
+    echo "Incident marked as resolved. Run: chaos reveal"
+}
+
+cmd_reveal() {
+    [ $# -eq 0 ] || die_usage "reveal"
+    incident_active && die_state "The incident is still active. Run chaos resolved first"
+    [ -s "$RESOLVED_FILE" ] || die_state "Nothing to reveal. Run chaos resolved first"
+    local encoded
+    read -r encoded <"$RESOLVED_FILE"
+    echo "Incident: $(scenario_field "$encoded" SCENARIO_TITLE)"
+    scenario_field "$encoded" SCENARIO_DETAILS
+    echo
+}
+
+cmd_fix() {
+    [ $# -eq 0 ] || die_usage "fix"
+    local source_file
+    if incident_active; then
+        source_file=$ACTIVE_FILE
+    elif [ -s "$RESOLVED_FILE" ]; then
+        source_file=$RESOLVED_FILE
+    else
+        die_state "No incident to fix"
+    fi
+
+    local answer encoded
+    read -r -p "This restores the whole system and ends the incident. Continue? [y/N] " answer
+    if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
+        echo "Aborted"
+        return 0
+    fi
+
+    read -r encoded <"$source_file"
+    run_scenario "$encoded" scenario_fix || die_state "Restore failed. Run chaos fix again"
+    drop_pending_complaint
+    rm -f "$ACTIVE_FILE"
+    rm -rf "$WORK_DIR"
+    log_event "incident fixed with chaos fix"
+    echo "System restored"
+}
+
+# Called by the sim heartbeat once per beat with the worked seconds of the session.
+cmd_tick() {
+    local worked=${1:-0} today encoded
+    today=$(date +%F)
+    [ -f "$ARMED_FILE" ] || return 0
+    incident_active && return 0
+    [ "$worked" -ge "$MIN_SESSION_SECONDS" ] || return 0
+    if [ -s "$LAST_TRIGGER_FILE" ] && [ "$(cat "$LAST_TRIGGER_FILE")" = "$today" ]; then
+        return 0
+    fi
+    [ $((RANDOM % TICK_ODDS)) -eq 0 ] || return 0
+    [ -s "$SCENARIOS_FILE" ] || return 0
+
+    if [ -n "${SIM_TEST_CHAOS_INDEX:-}" ]; then
+        encoded=$(sed -n "${SIM_TEST_CHAOS_INDEX}p" "$SCENARIOS_FILE")
+        run_scenario "$encoded" scenario_ready || return 2
+    else
+        encoded=$(pick_scenario "$SCENARIOS_FILE") || return 0
+    fi
+    # The day counts once the incident is really running.
+    start_incident "$encoded" random || return 2
+    echo "$today" >"$LAST_TRIGGER_FILE"
+}
+
+print_help() {
+    cat <<'EOF'
+chaos - incident engine for the FinSim simulation
+
+Usage: chaos <command> [arguments]
+
+Commands:
+  arm          Turn random incidents on
+  disarm       Turn random incidents off
+  status       Show armed or disarmed, and whether an incident is active
+  run <file>   Start an incident from a scenario file
+  resolved     Mark the active incident as resolved by you
+  reveal       Show what happened, only after chaos resolved
+  fix          Emergency restore of the whole system (asks for y/N)
+  help         Show this help
+
+Exit codes: 0 success, 1 wrong usage, 2 state error
+EOF
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        print_help >&2
+        exit 1
+    fi
+
+    mkdir -p "$CHAOS_DIR" || die_state "Cannot create $CHAOS_DIR"
+
+    local command=$1
+    shift
+    case $command in
+        arm | disarm | status | run | resolved | reveal | fix)
+            "cmd_$command" "$@"
+            ;;
+        help)
+            [ $# -eq 0 ] || die_usage "help"
+            print_help
+            ;;
+        __tick)
+            cmd_tick "$@"
+            ;;
+        *)
+            print_help >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

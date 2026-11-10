@@ -6,6 +6,7 @@ import time
 
 import psycopg
 import redis
+from prometheus_client import Counter, Histogram, start_http_server
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -23,6 +24,15 @@ DB_SETTINGS = {
 }
 QUEUE = os.environ["REDIS_QUEUE"]
 RETRY_DELAY_SECONDS = 2
+METRICS_PORT = int(os.environ.get("METRICS_PORT", "9100"))
+
+PAYMENTS_TOTAL = Counter("finsim_payments_total", "Payments by status", ["status"])
+PROCESSING_SECONDS = Histogram(
+    "finsim_payment_processing_seconds", "Time spent handling one payment"
+)
+FAILED_AMOUNT_TOTAL = Counter(
+    "finsim_failed_amount_total", "Total amount of failed and rejected payments"
+)
 
 running = True
 
@@ -38,6 +48,11 @@ def rejection_reason(accounts, from_account, to_account, amount, currency):
     if accounts[from_account]["balance"] < amount:
         return "insufficient funds"
     return None
+
+
+def record_lost_payment(status, amount):
+    PAYMENTS_TOTAL.labels(status=status).inc()
+    FAILED_AMOUNT_TOTAL.inc(float(amount))
 
 
 def process_payment(payment_id):
@@ -86,8 +101,10 @@ def process_payment(payment_id):
         )
 
     if reason is None:
+        PAYMENTS_TOTAL.labels(status="completed").inc()
         log.info("Payment %s completed", payment_id)
     else:
+        record_lost_payment("rejected", amount)
         log.info("Payment %s rejected: %s", payment_id, reason)
 
 
@@ -100,6 +117,7 @@ def main():
         port=int(os.environ["REDIS_PORT"]),
         decode_responses=True,
     )
+    start_http_server(METRICS_PORT)
     log.info("Ledger worker started, queue=%s", QUEUE)
 
     while running:
@@ -115,12 +133,15 @@ def main():
 
         payment_id = int(item[1])
         try:
-            process_payment(payment_id)
+            with PROCESSING_SECONDS.time():
+                process_payment(payment_id)
         except psycopg.OperationalError as error:
             log.warning("Database is unavailable, requeueing payment %s: %s", payment_id, error)
             queue_client.rpush(QUEUE, payment_id)
             time.sleep(RETRY_DELAY_SECONDS)
         except Exception:
+            # The amount is unknown here, so only the status counter grows.
+            PAYMENTS_TOTAL.labels(status="failed").inc()
             log.exception("Failed to process payment %s", payment_id)
 
     log.info("Ledger worker stopped")

@@ -20,7 +20,10 @@ WORKLOG_HEADER="date,start,end,minutes,note"
 SECONDS_PER_DAY=86400
 DAYS_PER_SPRINT=5
 DEFAULT_FOCUS_MINUTES=50
-HEARTBEAT_SECONDS=60
+HEARTBEAT_SECONDS="${SIM_TEST_HEARTBEAT_SECONDS:-60}"
+CHAOS_TICK_TIMEOUT_SECONDS=180
+INBOX_DIR="$SIM_DIR/inbox"
+GH_TIMEOUT_SECONDS=15
 
 die_usage() {
     echo "Usage: sim $1" >&2
@@ -95,9 +98,21 @@ write_heartbeat() {
     date +%s >"$HEARTBEAT_FILE.tmp" && mv "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE"
 }
 
+# Random incidents start from the heartbeat, so no second background process is needed.
+chaos_tick() {
+    local chaos_bin
+    chaos_bin="$(dirname "$0")/chaos"
+    [ -x "$chaos_bin" ] || return 0
+    load_session || return 0
+    [ "$SESSION_PAUSE_START" -eq 0 ] || return 0
+    timeout "$CHAOS_TICK_TIMEOUT_SECONDS" "$chaos_bin" __tick \
+        "$(session_worked_seconds "$(date +%s)")" >/dev/null 2>&1
+}
+
 heartbeat_loop() {
     while [ -f "$SESSION_FILE" ]; do
         write_heartbeat
+        chaos_tick
         sleep "$HEARTBEAT_SECONDS"
     done
 }
@@ -240,8 +255,17 @@ commits_since() {
     git log --oneline --no-decorate --since="$(date -d "@$1" '+%F %T')" 2>/dev/null
 }
 
+# Prints open GitHub issues as "#number title". Fails if gh cannot provide them.
+open_issues() {
+    command -v gh >/dev/null 2>&1 || return 1
+    timeout "$GH_TIMEOUT_SECONDS" gh issue list --state open --limit 100 \
+        --json number,title --jq '.[] | "#\(.number) \(.title)"' 2>/dev/null
+}
+
 open_tickets() {
     local root file status
+    # A successful empty list means no open issues, so only a failure falls back to files.
+    open_issues && return 0
     root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$PWD
     for file in "$root"/tickets/OPS-*.md; do
         [ -f "$file" ] || continue
@@ -260,6 +284,25 @@ print_list() {
     else
         echo "$1 none"
     fi
+}
+
+# --- Inbox --------------------------------------------------------------
+
+# The file name starts with the delivery epoch, so delivery needs no running process.
+new_messages() {
+    local file name now
+    now=$(date +%s)
+    for file in "$INBOX_DIR"/*.msg; do
+        [ -f "$file" ] || continue
+        name=${file##*/}
+        if [ "${name%%-*}" -le "$now" ]; then
+            echo "$file"
+        fi
+    done | sort
+}
+
+count_new_messages() {
+    new_messages | grep -c .
 }
 
 # --- Commands -----------------------------------------------------------
@@ -446,9 +489,31 @@ cmd_standup() {
     echo "Hours today: $(to_hours "$(minutes_on "$TODAY")") | This week: $(to_hours "$(minutes_this_week)")"
     print_list "Commits since last standup:" "$(commits_since "$since")"
     print_list "Open tickets:" "$(open_tickets)"
+    echo "Unread messages: $(count_new_messages)"
     echo "==============="
 
     date +%s >"$STANDUP_FILE" || die_state "Cannot write $STANDUP_FILE"
+}
+
+cmd_inbox() {
+    [ $# -eq 0 ] || die_usage "inbox"
+    local messages file
+    messages=$(new_messages)
+    if [ -z "$messages" ]; then
+        echo "No new messages"
+        return 0
+    fi
+    mkdir -p "$INBOX_DIR/read" || die_state "Cannot create $INBOX_DIR/read"
+    while IFS= read -r file; do
+        cat "$file"
+        mv "$file" "$INBOX_DIR/read/" || die_state "Cannot move $file"
+    done <<<"$messages"
+}
+
+cmd_ticket() {
+    [ $# -eq 1 ] && [[ $1 =~ ^[1-9][0-9]*$ ]] || die_usage "ticket <number>"
+    command -v gh >/dev/null 2>&1 || die_state "gh is not available"
+    gh issue view "$1" || die_state "Cannot show issue $1"
 }
 
 print_help() {
@@ -468,6 +533,8 @@ Commands:
   dayoff [YYYY-MM-DD]   Mark a day off (default: today)
   report [today|week]   Show hours for today or for this week (default: today)
   standup               Print a standup block ready to paste into chat
+  inbox                 Show new chat messages and mark them as read
+  ticket <number>       Show a GitHub issue
   help                  Show this help
 
 Exit codes: 0 success, 1 wrong usage, 2 state error
@@ -488,10 +555,16 @@ main() {
     mkdir -p "$SIM_DIR" || die_state "Cannot create $SIM_DIR"
     TODAY=$(date +%F)
 
-    local command=$1
+    local command=$1 unread
     shift
+    if [ "$command" != "__heartbeat" ]; then
+        unread=$(count_new_messages)
+        if [ "$unread" -gt 0 ]; then
+            echo "You have $unread new messages (sim inbox)"
+        fi
+    fi
     case $command in
-        init | start | stop | pause | resume | status | focus | dayoff | report | standup | help)
+        init | start | stop | pause | resume | status | focus | dayoff | report | standup | inbox | ticket | help)
             "cmd_$command" "$@"
             ;;
         __heartbeat)
