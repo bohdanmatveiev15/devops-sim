@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 #
 # sim - work-time tracker for the FinSim simulation.
-# Requires bash 4.2+ and GNU date. Data lives in ~/.devops-sim/.
+# Requires bash 4.2+ and GNU date. Data lives in $SIM_HOME (default ~/.devops-sim/).
 # Exit codes: 0 success, 1 wrong usage, 2 state error.
 
 # A fixed locale keeps weekday names in English and decimals printed with a dot.
 export LC_ALL=C
 
-SIM_DIR="$HOME/.devops-sim"
+SIM_DIR="${SIM_HOME:-$HOME/.devops-sim}"
 CONFIG_FILE="$SIM_DIR/config"
 WORKLOG_FILE="$SIM_DIR/worklog.csv"
 SESSION_FILE="$SIM_DIR/session"
 DAYOFF_FILE="$SIM_DIR/dayoffs"
 STANDUP_FILE="$SIM_DIR/last_standup"
+HEARTBEAT_FILE="$SIM_DIR/heartbeat"
+HEARTBEAT_PID_FILE="$SIM_DIR/heartbeat.pid"
 
 WORKLOG_HEADER="date,start,end,minutes,note"
 SECONDS_PER_DAY=86400
 DAYS_PER_SPRINT=5
 DEFAULT_FOCUS_MINUTES=50
+HEARTBEAT_SECONDS=60
 
 die_usage() {
     echo "Usage: sim $1" >&2
@@ -78,10 +81,90 @@ save_session() {
 # Prints the worked seconds of the loaded session up to the epoch in $1.
 session_worked_seconds() {
     local paused=$SESSION_PAUSED
-    if [ "$SESSION_PAUSE_START" -gt 0 ]; then
+    # An interrupted session is measured up to its last heartbeat, which can be
+    # earlier than the pause start.
+    if [ "$SESSION_PAUSE_START" -gt 0 ] && [ "$1" -ge "$SESSION_PAUSE_START" ]; then
         paused=$((paused + $1 - SESSION_PAUSE_START))
     fi
     echo "$(($1 - SESSION_START - paused))"
+}
+
+# --- Heartbeat ----------------------------------------------------------
+
+write_heartbeat() {
+    date +%s >"$HEARTBEAT_FILE.tmp" && mv "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE"
+}
+
+heartbeat_loop() {
+    while [ -f "$SESSION_FILE" ]; do
+        write_heartbeat
+        sleep "$HEARTBEAT_SECONDS"
+    done
+}
+
+# The command line is checked because a new process can reuse an old PID.
+heartbeat_alive() {
+    local pid
+    [ -s "$HEARTBEAT_PID_FILE" ] || return 1
+    read -r pid <"$HEARTBEAT_PID_FILE"
+    [[ $pid =~ ^[0-9]+$ ]] || return 1
+    tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -q -- ' __heartbeat '
+}
+
+# setsid detaches the process from the terminal, so closing the terminal does not stop it.
+start_heartbeat() {
+    local attempt
+    write_heartbeat || die_state "Cannot write $HEARTBEAT_FILE"
+    setsid "$0" __heartbeat </dev/null >/dev/null 2>&1 &
+    echo "$!" >"$HEARTBEAT_PID_FILE" || die_state "Cannot write $HEARTBEAT_PID_FILE"
+    for attempt in {1..50}; do
+        heartbeat_alive && return 0
+        sleep 0.02
+    done
+}
+
+# setsid makes the heartbeat a process group leader; the group also holds its sleep.
+stop_heartbeat() {
+    if heartbeat_alive; then
+        kill -- "-$(cat "$HEARTBEAT_PID_FILE")" 2>/dev/null
+    fi
+    rm -f "$HEARTBEAT_FILE" "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_PID_FILE"
+}
+
+# A session without a heartbeat file was started by an older sim and is not tracked.
+session_interrupted() {
+    [ -s "$HEARTBEAT_FILE" ] && ! heartbeat_alive
+}
+
+# Prints the epoch up to which the loaded session counts as worked.
+session_end_epoch() {
+    if session_interrupted; then
+        cat "$HEARTBEAT_FILE"
+    else
+        date +%s
+    fi
+}
+
+# Writes the loaded session to the worklog and clears it: <end epoch> <minutes> <note>
+save_to_worklog() {
+    if [ ! -s "$WORKLOG_FILE" ]; then
+        echo "$WORKLOG_HEADER" >"$WORKLOG_FILE" || die_state "Cannot write $WORKLOG_FILE"
+    fi
+    printf '%s,%s,%s,%s,%s\n' "$(date_of_epoch "$SESSION_START")" "$(clock_time "$SESSION_START")" \
+        "$(clock_time "$1")" "$2" "$(csv_escape "$3")" >>"$WORKLOG_FILE" ||
+        die_state "Cannot write $WORKLOG_FILE"
+
+    stop_heartbeat
+    rm -f "$SESSION_FILE"
+}
+
+# Closes the loaded session at its last heartbeat. Takes an optional note.
+close_interrupted_session() {
+    local last_beat minutes
+    last_beat=$(cat "$HEARTBEAT_FILE")
+    minutes=$(($(session_worked_seconds "$last_beat") / 60))
+    save_to_worklog "$last_beat" "$minutes" "${1:-}"
+    echo "Session was interrupted. Saved until $(clock_time "$last_beat"): $minutes min"
 }
 
 # Minutes worked on a date. A session belongs to the date on which it started.
@@ -92,7 +175,7 @@ minutes_on() {
         total=$(awk -F, -v day="$day" '$1 == day { sum += $4 } END { print sum + 0 }' "$WORKLOG_FILE")
     fi
     if load_session && [ "$(date_of_epoch "$SESSION_START")" = "$day" ]; then
-        total=$((total + $(session_worked_seconds "$(date +%s)") / 60))
+        total=$((total + $(session_worked_seconds "$(session_end_epoch)") / 60))
     fi
     echo "$total"
 }
@@ -194,29 +277,27 @@ cmd_init() {
 cmd_start() {
     [ $# -eq 0 ] || die_usage "start"
     if load_session; then
-        die_state "Session already running since $(clock_time "$SESSION_START")"
+        session_interrupted || die_state "Session already running since $(clock_time "$SESSION_START")"
+        close_interrupted_session
     fi
     local now
     now=$(date +%s)
     save_session "$now" 0 0
+    start_heartbeat
     echo "Session started at $(clock_time "$now")"
 }
 
 cmd_stop() {
     [ $# -le 1 ] || die_usage 'stop ["note"]'
     load_session || die_state "No active session"
+    if session_interrupted; then
+        close_interrupted_session "${1:-}"
+        return 0
+    fi
     local now minutes
     now=$(date +%s)
     minutes=$(($(session_worked_seconds "$now") / 60))
-
-    if [ ! -s "$WORKLOG_FILE" ]; then
-        echo "$WORKLOG_HEADER" >"$WORKLOG_FILE" || die_state "Cannot write $WORKLOG_FILE"
-    fi
-    printf '%s,%s,%s,%s,%s\n' "$(date_of_epoch "$SESSION_START")" "$(clock_time "$SESSION_START")" \
-        "$(clock_time "$now")" "$minutes" "$(csv_escape "${1:-}")" >>"$WORKLOG_FILE" ||
-        die_state "Cannot write $WORKLOG_FILE"
-
-    rm -f "$SESSION_FILE"
+    save_to_worklog "$now" "$minutes" "${1:-}"
     echo "Session saved: $minutes min"
 }
 
@@ -247,7 +328,9 @@ cmd_resume() {
 
 cmd_status() {
     [ $# -eq 0 ] || die_usage "status"
-    if load_session; then
+    if load_session && session_interrupted; then
+        echo "Session interrupted (codespace was stopped). Run: sim stop"
+    elif load_session; then
         local worked
         worked=$(($(session_worked_seconds "$(date +%s)") / 60))
         if [ "$SESSION_PAUSE_START" -gt 0 ]; then
@@ -262,7 +345,6 @@ cmd_status() {
 }
 
 notify_windows() {
-    command -v powershell.exe >/dev/null 2>&1 || return 1
     powershell.exe -NoProfile -NonInteractive -Command "
         Add-Type -AssemblyName System.Windows.Forms, System.Drawing;
         \$icon = New-Object System.Windows.Forms.NotifyIcon;
@@ -284,8 +366,13 @@ cmd_focus() {
     local seconds=$((minutes * 60))
     echo "Focus started: $minutes min, until $(clock_time "$(($(date +%s) + seconds))"). Press Ctrl+C to cancel."
     sleep "$seconds"
-    notify_windows "Focus finished: $minutes min"
-    echo "Focus finished: $minutes min"
+    if command -v powershell.exe >/dev/null 2>&1; then
+        notify_windows "Focus finished: $minutes min"
+        echo "Focus finished: $minutes min"
+    else
+        printf '\a'
+        echo "Focus session finished ($minutes min)"
+    fi
 }
 
 cmd_dayoff() {
@@ -406,6 +493,9 @@ main() {
     case $command in
         init | start | stop | pause | resume | status | focus | dayoff | report | standup | help)
             "cmd_$command" "$@"
+            ;;
+        __heartbeat)
+            heartbeat_loop
             ;;
         *)
             print_help >&2

@@ -1,5 +1,7 @@
 # FinSim
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/bohdanmatveiev15/devops-sim)
+
 FinSim is a learning homelab project: a small payment system for a fictional fintech
 company, used to practise DevOps work on a realistic application. FinSim is not a real
 brand or product, and all data in it is test data.
@@ -31,6 +33,22 @@ flowchart LR
 
 ## Run
 
+### GitHub Codespaces
+
+This is the primary environment, and it needs only a browser. Select the **Open in GitHub
+Codespaces** badge above. When the codespace is ready, `.env` already exists and `bin` is in
+your `PATH`, so run:
+
+```bash
+make up
+make ps
+```
+
+See [docs/codespaces.md](docs/codespaces.md) for stopping, rebuilding, opening ports and saving
+quota.
+
+### WSL2 Ubuntu
+
 You need Docker Engine with the Compose plugin, and `make`.
 
 ```bash
@@ -38,6 +56,8 @@ cp .env.example .env
 make up
 make ps
 ```
+
+### Commands
 
 | Command               | Action                                                |
 | --------------------- | ----------------------------------------------------- |
@@ -50,6 +70,7 @@ make ps
 | `make load-on`        | Turn the load generator on                            |
 | `make load-off`       | Turn the load generator off                           |
 | `make reset`          | Delete all data and start again (asks for y/N)        |
+| `make prune`          | Delete unused images and build cache, keep volumes (asks for y/N) |
 
 The load generator reads `ENABLED` and `RPS` (requests per second) from `.env`. After you
 change `RPS`, run `make up` to apply it.
@@ -74,10 +95,11 @@ accounts use USD.
 
 ## sim
 
-Add `bin` to your `PATH` through `~/.bashrc`, then reload the shell configuration:
+In Codespaces, `sim` is ready to use. In WSL, run this from the repository root to add `bin`
+to your `PATH`:
 
 ```bash
-echo 'export PATH="$HOME/devops-sim/bin:$PATH"' >> ~/.bashrc
+echo "export PATH=\"$PWD/bin:\$PATH\"" >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -97,7 +119,8 @@ source ~/.bashrc
 
 Exit codes: `0` success, `1` wrong usage, `2` state error.
 
-Data is stored outside the repository in `~/.devops-sim/`. Run `sim standup` from inside
+Data is stored outside the repository in `$SIM_HOME`: `/workspaces/.devops-sim` in Codespaces,
+and `~/.devops-sim/` by default in WSL. Run `sim standup` from inside
 this repository, because it reads the commits and tickets of the current repository. Each
 run moves the "last standup" marker, so a second run lists only newer commits.
 

@@ -1,0 +1,32 @@
+{
+  "name": "FinSim DevOps simulation",
+  "features": {
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+  },
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "8gb"
+  },
+  "containerEnv": {
+    "SIM_HOME": "/workspaces/.devops-sim",
+    "SIM_SSH_PUBKEY": "/workspaces/.devops-sim/ssh/id_ed25519.pub",
+    "TZ": "Europe/Kyiv"
+  },
+  "remoteEnv": {
+    "PATH": "${containerWorkspaceFolder}/bin:${containerEnv:PATH}"
+  },
+  "forwardPorts": [8080, 8081],
+  "portsAttributes": {
+    "8080": {
+      "label": "FinSim prod"
+    },
+    "8081": {
+      "label": "FinSim staging"
+    }
+  },
+  "otherPortsAttributes": {
+    "onAutoForward": "silent"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh"
+}
