@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 COMPOSE := docker compose
 
-.PHONY: up down restart ps logs load-on load-off reset
+.PHONY: up down restart ps logs load-on load-off reset prune
 
 up:
 	$(COMPOSE) up -d --build
@@ -34,6 +34,16 @@ reset:
 	@read -r -p "This deletes all FinSim data (volumes). Continue? [y/N] " answer; \
 	if [ "$$answer" = "y" ] || [ "$$answer" = "Y" ]; then \
 		$(COMPOSE) down -v && $(COMPOSE) up -d --build; \
+	else \
+		echo "Aborted"; \
+	fi
+
+# Frees disk space. Volumes are kept, so FinSim data survives.
+prune:
+	@docker system df
+	@read -r -p "This deletes unused images and the build cache, but not volumes. Continue? [y/N] " answer; \
+	if [ "$$answer" = "y" ] || [ "$$answer" = "Y" ]; then \
+		docker image prune -a -f && docker builder prune -a -f; \
 	else \
 		echo "Aborted"; \
 	fi
