@@ -12,6 +12,19 @@ company. Claude builds the simulation environment. The human does the DevOps tic
   terminal fallback. Do not add `/mnt/c` or paths such as `~/devops-sim`.
 - Use paths relative to the repository root.
 
+## Workflow
+
+- Talk to the human in Ukrainian. Write code, comments, docs and commit messages in English.
+- Work in a branch and open a pull request.
+- Never merge pull requests and never push directly to `main`.
+
+## Disk and memory
+
+- Never build the dev container or run the devcontainer CLI inside a codespace. It is tested
+  only through **Rebuild Container**.
+- Before building Docker images, check `df -h /workspaces`. Stop and ask if less than 5 GB is free.
+- Prod plus infra must stay under 5 GB of RAM.
+
 ## Simulation data
 
 - Simulation data lives only in `$SIM_HOME`. In Codespaces that is `/workspaces/.devops-sim`;
@@ -29,6 +42,8 @@ These do not exist yet. When they are added:
 - `.devcontainer/post-create.sh` currently prepares only that key. Once bastion and
   legacy-vm-01 exist, it must also restore `~/.ssh/config` with entries for both servers
   pointing at that key, because the home directory is wiped on rebuild.
+- When staging, bastion, legacy-vm-01, chaos or other parts are added, update this file in the
+  same change so it describes the current state.
 
 ## Env files
 
@@ -42,9 +57,11 @@ These do not exist yet. When they are added:
 
 Do not implement, configure or partly prepare the following. They are the human's tickets:
 
-- Monitoring
+- Monitoring: Prometheus, Grafana, Alertmanager, Loki and alert rules. Application-level
+  `/metrics` endpoints written as app code are allowed.
 - CI/CD
-- Healthchecks
+- Healthchecks: Docker and compose healthchecks. The app's `/health` endpoint already exists
+  and stays.
 - Resource limits
 - Hardening
 - Terraform
@@ -52,8 +69,15 @@ Do not implement, configure or partly prepare the following. They are the human'
 - Vault
 - Messenger notifications
 
+Deliberately outdated or unreliable inherited parts (for example `scripts/deploy.sh`,
+legacy-reports, missing log rotation, missing docs) must not be fixed or improved. They are the
+human's tickets.
+
 If a task seems to need one of these, stop and ask.
 
 ## chaos/scenarios.dat
 
 Never read, decode or show the content of `chaos/scenarios.dat`, by any means.
+
+Never reveal scenario names, descriptions or hints in README, docs, commit messages, PR
+descriptions or chat.
