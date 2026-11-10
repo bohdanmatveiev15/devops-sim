@@ -20,10 +20,10 @@ fi
 
 cd "$DIR" || exit 1
 
-[ -f ".env.$ENV" ] || cp ".env.$ENV.example" ".env.$ENV"
-
 git fetch origin
 git checkout "origin/$REF" 2>/dev/null || git checkout "$REF"
+
+[ -f ".env.$ENV" ] || cp ".env.$ENV.example" ".env.$ENV"
 
 docker compose -p "finsim-$ENV" --env-file ".env.$ENV" build
 docker compose -p "finsim-$ENV" --env-file ".env.$ENV" up -d
