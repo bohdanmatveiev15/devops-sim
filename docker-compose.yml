@@ -1,6 +1,5 @@
-name: finsim
-
-# Values come from the .env file next to this file.
+# Values come from the env file of the environment, .env.prod or .env.staging.
+# Run this file through make, which sets the project name and the env file.
 # Each service gets only its own variables, so changing a load generator
 # setting does not recreate the database or the application.
 x-app-environment: &app-environment
@@ -45,7 +44,7 @@ services:
   nginx:
     image: nginx:1.27
     ports:
-      - "8080:80"
+      - "${NGINX_PORT}:80"
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:

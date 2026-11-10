@@ -6,7 +6,8 @@ from decimal import Decimal
 import psycopg
 import redis
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
 from uvicorn.config import LOGGING_CONFIG
 
@@ -36,12 +37,25 @@ PAYMENT_COLUMNS = "id, from_account, to_account, amount, currency, status"
 
 app = FastAPI(title="FinSim Payments API")
 
+PAYMENTS_TOTAL = Counter("finsim_payments_total", "Payments by status", ["status"])
+PROCESSING_SECONDS = Histogram(
+    "finsim_payment_processing_seconds", "Time spent handling one payment"
+)
+FAILED_AMOUNT_TOTAL = Counter(
+    "finsim_failed_amount_total", "Total amount of failed and rejected payments"
+)
+
 
 class PaymentRequest(BaseModel):
     from_account: int = Field(gt=0, le=MAX_ACCOUNT_ID)
     to_account: int = Field(gt=0, le=MAX_ACCOUNT_ID)
     amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     currency: str = Field(pattern="^[A-Z]{3}$")
+
+
+def record_lost_payment(status, amount):
+    PAYMENTS_TOTAL.labels(status=status).inc()
+    FAILED_AMOUNT_TOTAL.inc(float(amount))
 
 
 def payment_to_dict(row):
@@ -61,9 +75,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/payments", status_code=201)
+@PROCESSING_SECONDS.time()
 def create_payment(payment: PaymentRequest):
     if payment.from_account == payment.to_account:
+        record_lost_payment("rejected", payment.amount)
         raise HTTPException(status_code=422, detail="from_account and to_account must differ")
 
     try:
@@ -77,9 +98,18 @@ def create_payment(payment: PaymentRequest):
                 (payment.from_account, payment.to_account, payment.amount, payment.currency),
             ).fetchone()
     except psycopg.errors.ForeignKeyViolation:
+        record_lost_payment("rejected", payment.amount)
         raise HTTPException(status_code=404, detail="Account not found")
+    except psycopg.Error:
+        record_lost_payment("failed", payment.amount)
+        raise
 
-    queue_client.lpush(QUEUE, row[0])
+    try:
+        queue_client.lpush(QUEUE, row[0])
+    except redis.RedisError:
+        record_lost_payment("failed", payment.amount)
+        raise
+    PAYMENTS_TOTAL.labels(status="pending").inc()
     log.info("Payment %s created and queued", row[0])
     return payment_to_dict(row)
 

@@ -1,0 +1,1 @@
+*/5 * * * * root /usr/bin/python3 /opt/reports/bin/generate_report.py >>/var/log/legacy-reports/cron.out 2>&1

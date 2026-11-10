@@ -1,0 +1,32 @@
+# FinSim servers. Run this file through make infra-up, which sets SIM_HOME and SIM_SSH_PUBKEY.
+services:
+  bastion:
+    build: ./bastion
+    hostname: bastion
+    ports:
+      - "127.0.0.1:2223:22"
+    volumes:
+      - ${SIM_SSH_PUBKEY}:/etc/finsim/authorized_key.pub:ro
+      - ${SIM_HOME}/hostkeys/bastion:/etc/finsim/hostkeys:ro
+
+  legacy-vm-01:
+    build: ./legacy-vm-01
+    hostname: legacy-vm-01
+    environment:
+      REPORTS_DB_HOST: ${POSTGRES_HOST}
+      REPORTS_DB_PORT: ${POSTGRES_PORT}
+      REPORTS_DB_NAME: ${POSTGRES_DB}
+      REPORTS_DB_USER: ${POSTGRES_USER}
+      REPORTS_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ${SIM_SSH_PUBKEY}:/etc/finsim/authorized_key.pub:ro
+      - ${SIM_HOME}/hostkeys/legacy-vm-01:/etc/finsim/hostkeys:ro
+      - ${SIM_HOME}/secrets/ops-admin.txt:/etc/finsim/secrets/ops-admin.txt:ro
+    networks:
+      - default
+      - prod
+
+networks:
+  prod:
+    external: true
+    name: finsim-prod_default

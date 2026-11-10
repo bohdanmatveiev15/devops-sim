@@ -28,3 +28,40 @@ for example in "$repo_root"/.env*.example; do
         cp "$example" "$target"
     fi
 done
+
+# Host keys, the ops-admin password and known_hosts for bastion and legacy-vm-01.
+bash "$repo_root/infra/prepare.sh"
+
+# The home directory is wiped on rebuild, so the SSH client config is restored here.
+user_ssh_dir="$HOME/.ssh"
+ssh_config="$user_ssh_dir/config"
+block_begin="# BEGIN FinSim simulation hosts"
+block_end="# END FinSim simulation hosts"
+
+mkdir -p "$user_ssh_dir"
+chmod 700 "$user_ssh_dir"
+touch "$ssh_config"
+chmod 600 "$ssh_config"
+sed -i "/^$block_begin\$/,/^$block_end\$/d" "$ssh_config"
+
+cat >>"$ssh_config" <<EOF
+$block_begin
+Host bastion
+    HostName localhost
+    Port 2223
+    User bohdan
+    IdentityFile $ssh_key
+    IdentitiesOnly yes
+    UserKnownHostsFile $SIM_HOME/ssh/known_hosts
+    StrictHostKeyChecking yes
+
+Host legacy-vm-01
+    HostName legacy-vm-01
+    User bohdan
+    IdentityFile $ssh_key
+    IdentitiesOnly yes
+    ProxyJump bastion
+    UserKnownHostsFile $SIM_HOME/ssh/known_hosts
+    StrictHostKeyChecking yes
+$block_end
+EOF
