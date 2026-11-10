@@ -62,11 +62,31 @@ machine, that is 60 hours of running time.
 - Set a shorter idle timeout in <https://github.com/settings/codespaces>.
 - Keep one codespace and delete the ones you do not need, because storage is counted for as
   long as a codespace exists, even when it is stopped.
-- This repository uses a custom dev container image of about 4.3 GB, so it counts as storage
-  too. Only the default Codespaces image is excluded.
+- The dev container image does not count as storage. See [Dev container image](#dev-container-image).
 - Run `make prune` to remove unused Docker images and the build cache. It asks first and
   keeps volumes.
 - Check usage in <https://github.com/settings/billing>.
+
+## Dev container image
+
+`.devcontainer/devcontainer.json` has no `image` field, so Codespaces uses its default image.
+The version is not pinned: the image changes when GitHub updates it. It already includes
+Docker, Python, Node and `gh`, so the only added feature is Claude Code.
+
+According to the GitHub documentation, containers based on the default image do not count
+toward storage, even with added features. Files in the repository and files you add still count.
+
+WSL does not use the dev container.
+
+If a rebuild ends in a recovery container, the fallback is to add an `image` field back to
+`.devcontainer/devcontainer.json`, then rebuild:
+
+```json
+"image": "mcr.microsoft.com/devcontainers/universal:6",
+```
+
+The GitHub documentation does not confirm that an image set explicitly is excluded from
+storage, so check your usage after this change.
 
 ## GitHub Project board access
 
