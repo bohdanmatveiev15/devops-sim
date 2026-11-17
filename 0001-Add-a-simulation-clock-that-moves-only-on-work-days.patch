@@ -1,0 +1,229 @@
+From 98e8868103b22fbb485ecac78c05ef4634dfaa92 Mon Sep 17 00:00:00 2001
+From: bohdanmatveiev15 <bohdanmatveiev15@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 21:35:52 +0000
+Subject: [PATCH] Add a simulation clock that moves only on work days
+
+A simulation day is now a real date on which you work (sim start or
+sim standup), not every calendar day since sim init. Days away do not
+move the clock. The simulation calendar has only weekdays, and standup
+prints both the simulation date and the real date, plus sprint hours.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BWgtHECrhxzXRWrHYBDq2Z
+---
+ README.md |  16 ++++++--
+ bin/sim   | 113 ++++++++++++++++++++++++++++++++++++++----------------
+ 2 files changed, 94 insertions(+), 35 deletions(-)
+
+diff --git a/README.md b/README.md
+index eb4dd4b..02ed363 100644
+--- a/README.md
++++ b/README.md
+@@ -146,7 +146,7 @@ source ~/.bashrc
+ | `sim resume`          | Resume a paused session                               |
+ | `sim status`          | Show the session state and minutes worked today       |
+ | `sim focus [minutes]` | Run a focus timer, 50 minutes by default              |
+-| `sim dayoff [date]`   | Mark a day off, today by default (`YYYY-MM-DD`)       |
++| `sim dayoff [date]`   | Exclude a real date from the simulation, today by default (`YYYY-MM-DD`) |
+ | `sim report [period]` | Show hours for `today` (default) or `week`            |
+ | `sim standup`         | Print a standup block ready to paste into chat        |
+ | `sim inbox`           | Show new team chat messages and mark them as read     |
+@@ -164,8 +164,18 @@ and `~/.devops-sim/` by default in WSL. Run `sim standup` from inside
+ this repository, because it reads the commits and tickets of the current repository. Each
+ run moves the "last standup" marker, so a second run lists only newer commits.
+ 
+-A simulation day is a working day (Monday to Friday) counted from the `sim init` date,
+-without days marked with `sim dayoff`. One sprint is five such days.
++The simulation has its own clock. A real date becomes the next simulation day only when
++you work on it: the first `sim start` or `sim standup` of that date marks it. Days without
++work do not move the clock, so after a week away the simulation continues from the next
++day. The simulation calendar starts on the `sim init` date and has only working days
++(Monday to Friday), so a simulation date is never a weekend, even if you work on a real
++Saturday. One sprint is five simulation days.
++
++`sim standup` prints the simulation date as `Date` and the calendar date as `Real date`.
++`Hours today` counts the real date, and `This sprint` counts the current simulation sprint.
++The simulation days are listed in `$SIM_HOME/simdays`, one real date per line. The first
++run builds this file from the worklog. `sim dayoff` excludes a real date, also one that
++already started, and `sim init` starts the clock again.
+ 
+ ## chaos
+ 
+diff --git a/bin/sim b/bin/sim
+index 9ff5297..e38601b 100755
+--- a/bin/sim
++++ b/bin/sim
+@@ -15,6 +15,8 @@ DAYOFF_FILE="$SIM_DIR/dayoffs"
+ STANDUP_FILE="$SIM_DIR/last_standup"
+ HEARTBEAT_FILE="$SIM_DIR/heartbeat"
+ HEARTBEAT_PID_FILE="$SIM_DIR/heartbeat.pid"
++# One real date per line. Each line is one simulation day, in order.
++SIMDAYS_FILE="$SIM_DIR/simdays"
+ 
+ WORKLOG_HEADER="date,start,end,minutes,note"
+ SECONDS_PER_DAY=86400
+@@ -195,15 +197,6 @@ minutes_on() {
+     echo "$total"
+ }
+ 
+-minutes_this_week() {
+-    local monday offset total=0
+-    monday=$(week_start)
+-    for offset in 0 1 2 3 4 5 6; do
+-        total=$((total + $(minutes_on "$(add_days "$monday" "$offset")")))
+-    done
+-    echo "$total"
+-}
+-
+ to_hours() {
+     awk -v minutes="$1" 'BEGIN { printf "%.1f", minutes / 60 }'
+ }
+@@ -229,26 +222,73 @@ load_config() {
+     is_valid_date "$START_DATE"
+ }
+ 
+-# Counts working days from the start date through today, without days off.
++# --- Simulation clock ----------------------------------------------------
++#
++# The simulation has its own calendar. A real date becomes the next simulation
++# day only when you work on it (sim start or sim standup). Days without work do
++# not move the clock, so a week away is not a week lost.
++
++is_weekday() {
++    [ "$(date -u -d "$1" +%u)" -lt 6 ]
++}
++
++# Builds the simulation day list from the worklog when the file does not exist yet.
++# Only dates from the start date on are used, and days off are skipped.
++ensure_simdays() {
++    [ -f "$SIMDAYS_FILE" ] && return 0
++    {
++        if [ -f "$WORKLOG_FILE" ]; then
++            awk -F, 'NR > 1 && $1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/ { print $1 }' "$WORKLOG_FILE"
++        fi
++        if load_session; then
++            date_of_epoch "$SESSION_START"
++        fi
++    } | sort -u | while read -r day; do
++        if [[ ! $day < $START_DATE ]] && ! is_dayoff "$day"; then
++            echo "$day"
++        fi
++    done >"$SIMDAYS_FILE.tmp" && mv "$SIMDAYS_FILE.tmp" "$SIMDAYS_FILE" ||
++        die_state "Cannot write $SIMDAYS_FILE"
++}
++
++# Makes today a simulation day, unless it already is one or is a day off.
++mark_sim_day() {
++    load_config || return 0
++    ensure_simdays
++    is_dayoff "$TODAY" && return 0
++    grep -qx "$TODAY" "$SIMDAYS_FILE" && return 0
++    echo "$TODAY" >>"$SIMDAYS_FILE" || die_state "Cannot write $SIMDAYS_FILE"
++}
++
+ simulation_day() {
+-    local first last day timestamp count=0
+-    local -a dayoffs=()
+-    first=$(($(date -u -d "$START_DATE" +%s) / SECONDS_PER_DAY))
+-    last=$(($(date -u -d "$TODAY" +%s) / SECONDS_PER_DAY))
+-
+-    if [ -s "$DAYOFF_FILE" ]; then
+-        while read -r timestamp; do
+-            dayoffs[$((timestamp / SECONDS_PER_DAY))]=1
+-        done < <(date -u -f "$DAYOFF_FILE" +%s)
+-    fi
++    ensure_simdays
++    grep -c . "$SIMDAYS_FILE"
++}
+ 
+-    for ((day = first; day <= last; day++)); do
+-        # Day 0 of the epoch was a Thursday, so this gives 0 for Monday.
+-        if [ $(((day + 3) % 7)) -lt 5 ] && [ -z "${dayoffs[$day]}" ]; then
++# Prints the calendar date of simulation day $1: the start date plus $1 - 1
++# working days. Weekends never appear in the simulation calendar.
++sim_date() {
++    local day=$START_DATE count=1
++    while ! is_weekday "$day"; do
++        day=$(add_days "$day" 1)
++    done
++    while [ "$count" -lt "$1" ]; do
++        day=$(add_days "$day" 1)
++        if is_weekday "$day"; then
+             count=$((count + 1))
+         fi
+     done
+-    echo "$count"
++    echo "$day"
++}
++
++# Minutes worked in simulation sprint $1.
++minutes_in_sprint() {
++    local first total=0 day
++    first=$((($1 - 1) * DAYS_PER_SPRINT + 1))
++    while read -r day; do
++        total=$((total + $(minutes_on "$day")))
++    done < <(sed -n "${first},$((first + DAYS_PER_SPRINT - 1))p" "$SIMDAYS_FILE")
++    echo "$total"
+ }
+ 
+ commits_since() {
+@@ -314,6 +354,7 @@ cmd_init() {
+     start_date=${input:-$TODAY}
+     is_valid_date "$start_date" || die_usage "init (the date must be a real YYYY-MM-DD date)"
+     echo "START_DATE=$start_date" >"$CONFIG_FILE" || die_state "Cannot write $CONFIG_FILE"
++    rm -f "$SIMDAYS_FILE"
+     echo "Simulation start date: $start_date"
+ }
+ 
+@@ -327,6 +368,7 @@ cmd_start() {
+     now=$(date +%s)
+     save_session "$now" 0 0
+     start_heartbeat
++    mark_sim_day
+     echo "Session started at $(clock_time "$now")"
+ }
+ 
+@@ -427,6 +469,11 @@ cmd_dayoff() {
+         return 0
+     fi
+     echo "$day" >>"$DAYOFF_FILE" || die_state "Cannot write $DAYOFF_FILE"
++    # A day off is not a simulation day, even if a session was already started on it.
++    if [ -f "$SIMDAYS_FILE" ] && grep -qx "$day" "$SIMDAYS_FILE"; then
++        grep -vx "$day" "$SIMDAYS_FILE" >"$SIMDAYS_FILE.tmp"
++        mv "$SIMDAYS_FILE.tmp" "$SIMDAYS_FILE" || die_state "Cannot write $SIMDAYS_FILE"
++    fi
+     echo "Day off marked: $day"
+ }
+ 
+@@ -474,19 +521,21 @@ cmd_standup() {
+         since=$(date -d "$START_DATE" +%s)
+     fi
+ 
++    is_dayoff "$TODAY" && die_state "Today is marked as a day off, so it is not a simulation day"
++    mark_sim_day
++
++    local sim_today
+     day=$(simulation_day)
+-    sprint=1
+-    sprint_day=0
+-    if [ "$day" -gt 0 ]; then
+-        sprint=$(((day - 1) / DAYS_PER_SPRINT + 1))
+-        sprint_day=$(((day - 1) % DAYS_PER_SPRINT + 1))
+-    fi
++    sprint=$(((day - 1) / DAYS_PER_SPRINT + 1))
++    sprint_day=$(((day - 1) % DAYS_PER_SPRINT + 1))
++    sim_today=$(sim_date "$day")
+ 
+     echo "=== STANDUP ==="
+-    echo "Date: $TODAY ($(date -u -d "$TODAY" +%A))"
++    echo "Date: $sim_today ($(date -u -d "$sim_today" +%A))"
++    echo "Real date: $TODAY"
+     echo "Simulation day: $day"
+     echo "Sprint: $sprint, day $sprint_day of $DAYS_PER_SPRINT"
+-    echo "Hours today: $(to_hours "$(minutes_on "$TODAY")") | This week: $(to_hours "$(minutes_this_week)")"
++    echo "Hours today: $(to_hours "$(minutes_on "$TODAY")") | This sprint: $(to_hours "$(minutes_in_sprint "$sprint")")"
+     print_list "Commits since last standup:" "$(commits_since "$since")"
+     print_list "Open tickets:" "$(open_tickets)"
+     echo "Unread messages: $(count_new_messages)"
+-- 
+2.43.0
