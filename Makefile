@@ -9,9 +9,9 @@ endif
 ENV_FILE := .env.$(env)
 COMPOSE := docker compose -p finsim-$(env) --env-file $(ENV_FILE)
 
-# Codespaces sets these in devcontainer.json. The defaults are for WSL.
+# Codespaces sets these in devcontainer.json. The defaults work for a VPS and WSL.
 SIM_HOME ?= $(HOME)/.devops-sim
-SIM_SSH_PUBKEY ?= $(HOME)/.ssh/id_ed25519.pub
+SIM_SSH_PUBKEY ?= $(SIM_HOME)/ssh/id_ed25519.pub
 export SIM_HOME SIM_SSH_PUBKEY
 
 PROD_NETWORK := finsim-prod_default
