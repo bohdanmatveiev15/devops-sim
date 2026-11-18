@@ -1,5 +1,7 @@
 # Working in GitHub Codespaces
 
+Codespaces is the fallback environment. The primary one is the VPS, see [vps.md](vps.md).
+
 FinSim runs in a 2-core, 8 GB codespace and needs only a browser.
 
 ## Create a codespace
