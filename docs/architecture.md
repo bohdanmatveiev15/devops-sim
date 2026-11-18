@@ -48,14 +48,17 @@ flowchart LR
 
 | Port | Bound to         | Service                  | Reached from          |
 | ---- | ---------------- | ------------------------ | --------------------- |
-| 8080 | all interfaces   | prod `nginx`             | Host, Codespaces Ports tab |
-| 8081 | all interfaces   | staging `nginx`          | Host, Codespaces Ports tab |
+| 8080 | `127.0.0.1`      | prod `nginx`             | Host, SSH tunnel, Codespaces Ports tab |
+| 8081 | `127.0.0.1`      | staging `nginx`          | Host, SSH tunnel, Codespaces Ports tab |
 | 2223 | `127.0.0.1`      | `bastion` SSH            | Host only             |
 | 22   | container only   | `legacy-vm-01` SSH       | `bastion` only        |
 | 5432 | container only   | `postgres`               | Its own project, and prod also from `legacy-vm-01` |
 | 6379 | container only   | `redis`                  | Its own project       |
 | 8000 | container only   | `payments-api`           | Its own project       |
 | 9100 | container only   | `ledger-worker` metrics  | Its own project       |
+
+No published port listens on `0.0.0.0`, because the VPS has a public IP address. Docker
+publishes ports past the host firewall, so binding to `127.0.0.1` is what keeps them private.
 
 Port 2222 is not used because the Codespaces SSH server already listens on it.
 

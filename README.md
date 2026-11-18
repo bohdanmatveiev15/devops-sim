@@ -35,9 +35,14 @@ flowchart LR
 
 ## Run
 
+### VPS
+
+This is the primary environment: Ubuntu 24.04 with 8 GB of RAM and a public IP address. See
+[docs/vps.md](docs/vps.md) for the setup and for opening FinSim from your own computer.
+
 ### GitHub Codespaces
 
-This is the primary environment, and it needs only a browser. Select the **Open in GitHub
+This is the fallback environment, and it needs only a browser. Select the **Open in GitHub
 Codespaces** badge above. When the codespace is ready, `.env.prod` and `.env.staging` already
 exist and `bin` is in your `PATH`, so run:
 
@@ -129,8 +134,8 @@ on port 9100, in Prometheus format.
 
 ## sim
 
-In Codespaces, `sim` is ready to use. In WSL, run this from the repository root to add `bin`
-to your `PATH`:
+In Codespaces, `sim` is ready to use. On the VPS and in WSL, run this from the repository root
+to add `bin` to your `PATH`:
 
 ```bash
 echo "export PATH=\"$PWD/bin:\$PATH\"" >> ~/.bashrc
@@ -159,9 +164,9 @@ Exit codes: `0` success, `1` wrong usage, `2` state error.
 `gh` is unavailable. When new chat messages have arrived, every `sim` command starts with a
 reminder line.
 
-Data is stored outside the repository in `$SIM_HOME`: `/workspaces/.devops-sim` in Codespaces,
-and `~/.devops-sim/` by default in WSL. Run `sim standup` from inside
-this repository, because it reads the commits and tickets of the current repository. Each
+Data is stored outside the repository in `$SIM_HOME`: `$HOME/.devops-sim` on the VPS,
+`/workspaces/.devops-sim` in Codespaces, and `~/.devops-sim/` by default in WSL. Run
+`sim standup` from inside this repository, because it reads the commits and tickets of the current repository. Each
 run moves the "last standup" marker, so a second run lists only newer commits.
 
 A simulation day is a working day (Monday to Friday) counted from the `sim init` date,
