@@ -43,7 +43,8 @@ scripts/deploy.sh <env> <git-ref>
 
 | Command             | Action                                |
 | ------------------- | ------------------------------------- |
-| `sim start`, `sim stop` | Start and stop a work session     |
+| `sim work`          | Start the work day, or check how it is going |
+| `sim start`, `sim stop` | Start and stop a work session by hand |
 | `sim standup`       | Print your standup block              |
 | `sim inbox`         | Read new team chat messages           |
 | `sim ticket <n>`    | Show a ticket in the terminal         |

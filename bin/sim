@@ -15,12 +15,18 @@ DAYOFF_FILE="$SIM_DIR/dayoffs"
 STANDUP_FILE="$SIM_DIR/last_standup"
 HEARTBEAT_FILE="$SIM_DIR/heartbeat"
 HEARTBEAT_PID_FILE="$SIM_DIR/heartbeat.pid"
+# One simulation day per line, in order: <real date> <work|off>
+SIMDAYS_FILE="$SIM_DIR/simdays"
 
 WORKLOG_HEADER="date,start,end,minutes,note"
 SECONDS_PER_DAY=86400
 DAYS_PER_SPRINT=5
 DEFAULT_FOCUS_MINUTES=50
 HEARTBEAT_SECONDS="${SIM_TEST_HEARTBEAT_SECONDS:-60}"
+# A session closes by itself after this long without terminal input.
+IDLE_CLOSE_SECONDS="${SIM_TEST_IDLE_CLOSE_SECONDS:-1800}"
+# Terminal devices whose last input time counts as activity.
+PTS_DIR="${SIM_TEST_PTS_DIR:-/dev/pts}"
 CHAOS_TICK_TIMEOUT_SECONDS=180
 INBOX_DIR="$SIM_DIR/inbox"
 GH_TIMEOUT_SECONDS=15
@@ -94,8 +100,19 @@ session_worked_seconds() {
 
 # --- Heartbeat ----------------------------------------------------------
 
+# The heartbeat file holds the epoch of the last activity: terminal input or a sim command.
+# Takes an optional epoch; the default is now.
 write_heartbeat() {
-    date +%s >"$HEARTBEAT_FILE.tmp" && mv "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE"
+    echo "${1:-$(date +%s)}" >"$HEARTBEAT_FILE.tmp" && mv "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_FILE"
+}
+
+# Prints the latest input time of the user's terminals, or 0 if there is none.
+# The access time of a terminal device changes when someone types in it, as in the IDLE column of w.
+last_terminal_input() {
+    local uid
+    uid=$(id -u)
+    find "$PTS_DIR" -maxdepth 1 -user "$uid" ! -name ptmx -printf '%A@\n' 2>/dev/null |
+        awk '{ t = int($1); if (t > max) max = t } END { print max + 0 }'
 }
 
 # Random incidents start from the heartbeat, so no second background process is needed.
@@ -109,9 +126,23 @@ chaos_tick() {
         "$(session_worked_seconds "$(date +%s)")" >/dev/null 2>&1
 }
 
+# Each beat moves the heartbeat to the latest activity, never back and never past now.
+# After IDLE_CLOSE_SECONDS without activity, the loop closes the session itself and exits.
 heartbeat_loop() {
+    IN_HEARTBEAT_LOOP=1
+    local now activity last_beat
     while [ -f "$SESSION_FILE" ]; do
-        write_heartbeat
+        now=$(date +%s)
+        activity=$(last_terminal_input)
+        last_beat=$(cat "$HEARTBEAT_FILE" 2>/dev/null)
+        [[ $last_beat =~ ^[0-9]+$ ]] || last_beat=$now
+        [ "$activity" -gt "$last_beat" ] || activity=$last_beat
+        [ "$activity" -le "$now" ] || activity=$now
+        write_heartbeat "$activity"
+        if [ $((now - activity)) -gt "$IDLE_CLOSE_SECONDS" ]; then
+            load_session && close_interrupted_session >/dev/null
+            break
+        fi
         chaos_tick
         sleep "$HEARTBEAT_SECONDS"
     done
@@ -139,8 +170,9 @@ start_heartbeat() {
 }
 
 # setsid makes the heartbeat a process group leader; the group also holds its sleep.
+# The loop does not kill itself when it closes an idle session.
 stop_heartbeat() {
-    if heartbeat_alive; then
+    if [ -z "${IN_HEARTBEAT_LOOP:-}" ] && heartbeat_alive; then
         kill -- "-$(cat "$HEARTBEAT_PID_FILE")" 2>/dev/null
     fi
     rm -f "$HEARTBEAT_FILE" "$HEARTBEAT_FILE.tmp" "$HEARTBEAT_PID_FILE"
@@ -182,6 +214,27 @@ close_interrupted_session() {
     echo "Session was interrupted. Saved until $(clock_time "$last_beat"): $minutes min"
 }
 
+# Closes the session if it had no activity for IDLE_CLOSE_SECONDS. This also covers
+# a heartbeat that died long ago. A session without a heartbeat file is not tracked.
+close_idle_session() {
+    local last_beat
+    load_session || return 0
+    [ -s "$HEARTBEAT_FILE" ] || return 0
+    last_beat=$(cat "$HEARTBEAT_FILE")
+    [[ $last_beat =~ ^[0-9]+$ ]] || return 0
+    [ $(($(date +%s) - last_beat)) -gt "$IDLE_CLOSE_SECONDS" ] || return 0
+    close_interrupted_session >/dev/null
+    echo "Session closed after $((IDLE_CLOSE_SECONDS / 60)) min without activity." \
+        "Saved until $(clock_time "$last_beat") on $(date_of_epoch "$last_beat")"
+}
+
+# A sim command is activity, but only for a session whose heartbeat is still running:
+# an interrupted session keeps its last heartbeat as the end.
+record_activity() {
+    load_session && heartbeat_alive && write_heartbeat
+    return 0
+}
+
 # Minutes worked on a date. A session belongs to the date on which it started.
 minutes_on() {
     local day=$1 total=0
@@ -192,15 +245,6 @@ minutes_on() {
     if load_session && [ "$(date_of_epoch "$SESSION_START")" = "$day" ]; then
         total=$((total + $(session_worked_seconds "$(session_end_epoch)") / 60))
     fi
-    echo "$total"
-}
-
-minutes_this_week() {
-    local monday offset total=0
-    monday=$(week_start)
-    for offset in 0 1 2 3 4 5 6; do
-        total=$((total + $(minutes_on "$(add_days "$monday" "$offset")")))
-    done
     echo "$total"
 }
 
@@ -229,26 +273,94 @@ load_config() {
     is_valid_date "$START_DATE"
 }
 
-# Counts working days from the start date through today, without days off.
-simulation_day() {
-    local first last day timestamp count=0
-    local -a dayoffs=()
-    first=$(($(date -u -d "$START_DATE" +%s) / SECONDS_PER_DAY))
-    last=$(($(date -u -d "$TODAY" +%s) / SECONDS_PER_DAY))
+# --- Simulation clock ----------------------------------------------------
+#
+# The simulation has its own calendar of working days (Monday to Friday). It moves
+# one day when work starts on a new real date (sim start or sim work), or when a
+# real date is marked as a day off. More sessions on the same real date stay on the
+# same simulation day, and days without work or a day off do not move the clock.
 
-    if [ -s "$DAYOFF_FILE" ]; then
-        while read -r timestamp; do
-            dayoffs[$((timestamp / SECONDS_PER_DAY))]=1
-        done < <(date -u -f "$DAYOFF_FILE" +%s)
-    fi
-
-    for ((day = first; day <= last; day++)); do
-        # Day 0 of the epoch was a Thursday, so this gives 0 for Monday.
-        if [ $(((day + 3) % 7)) -lt 5 ] && [ -z "${dayoffs[$day]}" ]; then
-            count=$((count + 1))
+# Builds the simulation day list from existing data when the file does not exist yet.
+# Session dates become work days and past days off become days off, from the start
+# date through today. A date that is both counts as a day off. No existing file is changed.
+ensure_simdays() {
+    [ -f "$SIMDAYS_FILE" ] && return 0
+    {
+        if [ -f "$WORKLOG_FILE" ]; then
+            awk -F, 'NR > 1 && $1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/ { print $1, "work" }' "$WORKLOG_FILE"
         fi
-    done
-    echo "$count"
+        if load_session; then
+            echo "$(date_of_epoch "$SESSION_START") work"
+        fi
+        if [ -f "$DAYOFF_FILE" ]; then
+            awk '{ print $1, "off" }' "$DAYOFF_FILE"
+        fi
+    } | awk -v first="$START_DATE" -v last="$TODAY" '
+        $1 >= first && $1 <= last && (!($1 in kind) || $2 == "off") { kind[$1] = $2 }
+        END { for (day in kind) print day, kind[day] }' | sort >"$SIMDAYS_FILE.tmp" &&
+        mv "$SIMDAYS_FILE.tmp" "$SIMDAYS_FILE" ||
+        die_state "Cannot write $SIMDAYS_FILE"
+}
+
+is_simday() {
+    grep -q "^$1 " "$SIMDAYS_FILE"
+}
+
+add_simday() {
+    echo "$1 $2" >>"$SIMDAYS_FILE" || die_state "Cannot write $SIMDAYS_FILE"
+}
+
+# Adds days off that have arrived (today or earlier) and are not simulation days yet.
+sync_dayoffs() {
+    local day
+    [ -f "$DAYOFF_FILE" ] || return 0
+    while read -r day; do
+        if [[ ! $day < $START_DATE ]] && [[ ! $day > $TODAY ]] && ! is_simday "$day"; then
+            add_simday "$day" off
+        fi
+    done <"$DAYOFF_FILE"
+}
+
+# Prepares the clock before a command. Does nothing before sim init.
+update_clock() {
+    load_config || return 0
+    ensure_simdays
+    sync_dayoffs
+}
+
+# Makes today a work day of the simulation, unless it already is a simulation day.
+mark_work_day() {
+    load_config || return 0
+    ensure_simdays
+    is_simday "$TODAY" || add_simday "$TODAY" work
+}
+
+simulation_days_total() {
+    grep -c . "$SIMDAYS_FILE"
+}
+
+# Prints the simulation day number of a real date, or nothing if it is not one.
+simday_of() {
+    grep -n "^$1 " "$SIMDAYS_FILE" | head -n 1 | cut -d: -f1
+}
+
+# Prints the calendar date of simulation day $1. Day 1 is the first Monday on or
+# after the start date, and the simulation calendar has only Monday to Friday.
+sim_date() {
+    local monday weekday
+    weekday=$(date -u -d "$START_DATE" +%u)
+    monday=$(add_days "$START_DATE" "$(((8 - weekday) % 7))")
+    add_days "$monday" "$((($1 - 1) / 5 * 7 + ($1 - 1) % 5))"
+}
+
+# Minutes worked on the real dates of simulation sprint $1.
+minutes_in_sprint() {
+    local first total=0 day
+    first=$((($1 - 1) * DAYS_PER_SPRINT + 1))
+    while read -r day _; do
+        total=$((total + $(minutes_on "$day")))
+    done < <(sed -n "${first},$((first + DAYS_PER_SPRINT - 1))p" "$SIMDAYS_FILE")
+    echo "$total"
 }
 
 commits_since() {
@@ -314,7 +426,20 @@ cmd_init() {
     start_date=${input:-$TODAY}
     is_valid_date "$start_date" || die_usage "init (the date must be a real YYYY-MM-DD date)"
     echo "START_DATE=$start_date" >"$CONFIG_FILE" || die_state "Cannot write $CONFIG_FILE"
+    # A new start date starts the clock again. The old day list is kept as a copy.
+    if [ -f "$SIMDAYS_FILE" ]; then
+        mv "$SIMDAYS_FILE" "$SIMDAYS_FILE.bak" || die_state "Cannot move $SIMDAYS_FILE"
+    fi
     echo "Simulation start date: $start_date"
+}
+
+start_session() {
+    local now
+    now=$(date +%s)
+    save_session "$now" 0 0
+    start_heartbeat
+    mark_work_day
+    echo "Session started at $(clock_time "$now")"
 }
 
 cmd_start() {
@@ -323,11 +448,52 @@ cmd_start() {
         session_interrupted || die_state "Session already running since $(clock_time "$SESSION_START")"
         close_interrupted_session
     fi
-    local now
-    now=$(date +%s)
-    save_session "$now" 0 0
-    start_heartbeat
-    echo "Session started at $(clock_time "$now")"
+    start_session
+}
+
+cmd_work() {
+    [ $# -eq 0 ] || die_usage "work"
+    local unread answer
+    if load_session && session_interrupted; then
+        close_interrupted_session
+    elif load_session; then
+        if [ "$SESSION_PAUSE_START" -gt 0 ]; then
+            echo "Work day in progress, paused since $(clock_time "$SESSION_PAUSE_START"). Run: sim resume"
+        else
+            echo "Work day in progress since $(clock_time "$SESSION_START")"
+        fi
+        echo "Worked today: $(to_hours "$(minutes_on "$TODAY")") h ($(minutes_on "$TODAY") min)"
+        unread=$(count_new_messages)
+        if [ "$unread" -gt 0 ]; then
+            echo "Inbox: $unread new messages (sim inbox)"
+        else
+            echo "Inbox: no new messages"
+        fi
+        return 0
+    fi
+
+    if ! read -r -p "Start work day? [Y/n] " answer; then
+        echo
+        echo "Work day not started"
+        return 0
+    fi
+    case $answer in
+        "" | [Yy] | [Yy][Ee][Ss]) ;;
+        *)
+            echo "Work day not started"
+            return 0
+            ;;
+    esac
+
+    start_session
+    echo
+    if load_config; then
+        cmd_standup
+    else
+        echo "Simulation is not initialized, so there is no standup. Run: sim init"
+    fi
+    echo
+    cmd_inbox
 }
 
 cmd_stop() {
@@ -372,7 +538,7 @@ cmd_resume() {
 cmd_status() {
     [ $# -eq 0 ] || die_usage "status"
     if load_session && session_interrupted; then
-        echo "Session interrupted (codespace was stopped). Run: sim stop"
+        echo "Session interrupted (the heartbeat stopped). Run: sim stop"
     elif load_session; then
         local worked
         worked=$(($(session_worked_seconds "$(date +%s)") / 60))
@@ -427,6 +593,8 @@ cmd_dayoff() {
         return 0
     fi
     echo "$day" >>"$DAYOFF_FILE" || die_state "Cannot write $DAYOFF_FILE"
+    # A day off that has arrived takes a simulation day now; a future one when it arrives.
+    update_clock
     echo "Day off marked: $day"
 }
 
@@ -474,19 +642,38 @@ cmd_standup() {
         since=$(date -d "$START_DATE" +%s)
     fi
 
-    day=$(simulation_day)
+    # Today is the current simulation day once work has started on it. Before that,
+    # the standup shows the last simulation day.
+    local started=1 date_line kind sim_today
+    update_clock
+    day=$(simday_of "$TODAY")
+    if [ -z "$day" ]; then
+        started=0
+        day=$(simulation_days_total)
+    fi
     sprint=1
     sprint_day=0
+    date_line="not started"
     if [ "$day" -gt 0 ]; then
         sprint=$(((day - 1) / DAYS_PER_SPRINT + 1))
         sprint_day=$(((day - 1) % DAYS_PER_SPRINT + 1))
+        sim_today=$(sim_date "$day")
+        date_line="$sim_today ($(date -u -d "$sim_today" +%A))"
+        kind=$(sed -n "${day}p" "$SIMDAYS_FILE" | cut -d' ' -f2)
+        if [ "$kind" = "off" ]; then
+            date_line="$date_line (day off)"
+        fi
     fi
 
     echo "=== STANDUP ==="
-    echo "Date: $TODAY ($(date -u -d "$TODAY" +%A))"
+    echo "Date: $date_line"
+    echo "Real date: $TODAY"
     echo "Simulation day: $day"
-    echo "Sprint: $sprint, day $sprint_day of $DAYS_PER_SPRINT"
-    echo "Hours today: $(to_hours "$(minutes_on "$TODAY")") | This week: $(to_hours "$(minutes_this_week)")"
+    echo "Sprint $sprint, day $sprint_day"
+    echo "Hours today: $(to_hours "$(minutes_on "$TODAY")") | This sprint: $(to_hours "$(minutes_in_sprint "$sprint")")"
+    if [ "$started" -eq 0 ]; then
+        echo "Work day not started. Run: sim work"
+    fi
     print_list "Commits since last standup:" "$(commits_since "$since")"
     print_list "Open tickets:" "$(open_tickets)"
     echo "Unread messages: $(count_new_messages)"
@@ -524,6 +711,7 @@ Usage: sim <command> [arguments]
 
 Commands:
   init                  Set the simulation start date
+  work                  Start the work day, or show how it is going
   start                 Start a work session
   stop ["note"]         Stop the session and save it to the worklog
   pause                 Pause the session; paused time is not counted
@@ -553,18 +741,23 @@ main() {
     fi
 
     mkdir -p "$SIM_DIR" || die_state "Cannot create $SIM_DIR"
-    TODAY=$(date +%F)
+    # SIM_TEST_TODAY replaces the real date in tests of the simulation clock.
+    TODAY=${SIM_TEST_TODAY:-$(date +%F)}
 
     local command=$1 unread
     shift
     if [ "$command" != "__heartbeat" ]; then
+        close_idle_session
+        record_activity
+        update_clock
         unread=$(count_new_messages)
-        if [ "$unread" -gt 0 ]; then
+        # sim work prints its own inbox line.
+        if [ "$unread" -gt 0 ] && [ "$command" != "work" ]; then
             echo "You have $unread new messages (sim inbox)"
         fi
     fi
     case $command in
-        init | start | stop | pause | resume | status | focus | dayoff | report | standup | inbox | ticket | help)
+        init | work | start | stop | pause | resume | status | focus | dayoff | report | standup | inbox | ticket | help)
             "cmd_$command" "$@"
             ;;
         __heartbeat)
