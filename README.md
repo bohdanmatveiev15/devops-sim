@@ -145,13 +145,14 @@ source ~/.bashrc
 | Command               | Action                                                |
 | --------------------- | ----------------------------------------------------- |
 | `sim init`            | Set the simulation start date                         |
+| `sim work`            | Start the work day, or show how it is going           |
 | `sim start`           | Start a work session                                  |
 | `sim stop ["note"]`   | Stop the session and save it to the worklog           |
 | `sim pause`           | Pause the session; paused time is not counted         |
 | `sim resume`          | Resume a paused session                               |
 | `sim status`          | Show the session state and minutes worked today       |
 | `sim focus [minutes]` | Run a focus timer, 50 minutes by default              |
-| `sim dayoff [date]`   | Mark a day off, today by default (`YYYY-MM-DD`)       |
+| `sim dayoff [date]`   | Take a day off, today by default (`YYYY-MM-DD`)       |
 | `sim report [period]` | Show hours for `today` (default) or `week`            |
 | `sim standup`         | Print a standup block ready to paste into chat        |
 | `sim inbox`           | Show new team chat messages and mark them as read     |
@@ -160,17 +161,65 @@ source ~/.bashrc
 
 Exit codes: `0` success, `1` wrong usage, `2` state error.
 
+Run `make test` to check `sim`. It uses a temporary `SIM_HOME` under `/tmp`, never the real
+one, takes about 30 seconds and exits with `0` when every check passes.
+
+### Daily cycle
+
+Run `sim work` when you start working:
+
+```text
+$ sim work
+Start work day? [Y/n]
+```
+
+Enter starts a session, then prints the standup block and the new chat messages. Run
+`sim work` again during the day to see how long you have worked today and whether new
+messages are waiting.
+
+You do not need to stop the session. It closes by itself after 30 minutes without input in
+any of your terminals, and is saved up to the last input. Every `sim` command also counts as
+input. `sim stop ["note"]` still closes the session at once, for example to add a note.
+`sim start`, `sim pause` and `sim resume` work as before.
+
+If the heartbeat stops, for example because the machine was stopped, `sim status` reports the
+session as interrupted, and `sim stop`, `sim start` or `sim work` saves it up to the last
+heartbeat. After 30 minutes, the next `sim` command does this by itself.
+
 `sim standup` lists open GitHub issues as `#number title`, and falls back to `tickets/` if
 `gh` is unavailable. When new chat messages have arrived, every `sim` command starts with a
 reminder line.
 
 Data is stored outside the repository in `$SIM_HOME`: `$HOME/.devops-sim` on the VPS,
 `/workspaces/.devops-sim` in Codespaces, and `~/.devops-sim/` by default in WSL. Run
-`sim standup` from inside this repository, because it reads the commits and tickets of the current repository. Each
-run moves the "last standup" marker, so a second run lists only newer commits.
+`sim standup` from inside this repository, because it reads the commits and tickets of the
+current repository. Each run moves the "last standup" marker, so a second run lists only
+newer commits.
 
-A simulation day is a working day (Monday to Friday) counted from the `sim init` date,
-without days marked with `sim dayoff`. One sprint is five such days.
+### Simulation clock
+
+The simulation has its own calendar of working days. Day 1 is the first Monday on or after
+the `sim init` date, and the simulation calendar has only Monday to Friday, so a simulation
+date is never a weekend, even if you work on a real Saturday. One sprint is five simulation
+days.
+
+- The clock moves one day when you start work on a new real date (`sim work` or
+  `sim start`). More sessions on the same real date stay on the same simulation day, and the
+  length of the work does not matter.
+- Days without work do not move the clock, so after a week away the simulation continues
+  with the next day.
+- `sim dayoff` takes a simulation day off: work on Monday, a day off on Tuesday, and the
+  next work day is Wednesday. A future date takes its simulation day when that date arrives.
+
+`sim standup` prints the simulation date as `Date`, the calendar date as `Real date`, and
+`Sprint N, day M`. `Hours today` counts the real date and `This sprint` counts the current
+simulation sprint. Before work starts on a real date, the standup shows the last simulation
+day.
+
+The simulation days are listed in `$SIM_HOME/simdays`, one per line as `<real date> work` or
+`<real date> off`. If the file does not exist, the first `sim` command builds it from the
+worklog and past days off, without changing those files. `sim init` starts the clock again
+and keeps the old list as `simdays.bak`.
 
 ## chaos
 
