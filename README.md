@@ -161,6 +161,9 @@ source ~/.bashrc
 
 Exit codes: `0` success, `1` wrong usage, `2` state error.
 
+Run `make test` to check `sim`. It uses a temporary `SIM_HOME` under `/tmp`, never the real
+one, takes about 30 seconds and exits with `0` when every check passes.
+
 ### Daily cycle
 
 Run `sim work` when you start working:
