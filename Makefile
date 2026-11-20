@@ -9,15 +9,15 @@ endif
 ENV_FILE := .env.$(env)
 COMPOSE := docker compose -p finsim-$(env) --env-file $(ENV_FILE)
 
-# Codespaces sets these in devcontainer.json. The defaults are for WSL.
+# Codespaces sets these in devcontainer.json. The defaults work for a VPS and WSL.
 SIM_HOME ?= $(HOME)/.devops-sim
-SIM_SSH_PUBKEY ?= $(HOME)/.ssh/id_ed25519.pub
+SIM_SSH_PUBKEY ?= $(SIM_HOME)/ssh/id_ed25519.pub
 export SIM_HOME SIM_SSH_PUBKEY
 
 PROD_NETWORK := finsim-prod_default
 INFRA_COMPOSE := docker compose -p finsim-infra -f infra/docker-compose.yml --env-file .env.prod
 
-.PHONY: up down restart ps logs load-on load-off reset prune infra-up infra-down infra-ps
+.PHONY: up down restart ps logs load-on load-off reset prune infra-up infra-down infra-ps test
 
 up:
 	$(COMPOSE) up -d --build
@@ -76,3 +76,7 @@ infra-down:
 
 infra-ps:
 	$(INFRA_COMPOSE) ps
+
+# Checks bin/sim in a temporary SIM_HOME under /tmp. The real SIM_HOME is not used.
+test:
+	bash tests/test-sim.sh

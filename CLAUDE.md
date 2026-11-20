@@ -5,9 +5,14 @@ company. Claude builds the simulation environment. The human does the DevOps tic
 
 ## Environment
 
-- The primary environment is GitHub Codespaces on a 2-core, 8 GB machine, used only through
-  a browser. Local WSL2 Ubuntu stays supported, so changes must work in both.
-- The budget is $0: GitHub Free quota only (120 core-hours and 15 GB-months of storage).
+- The primary environment is a VPS: Ubuntu 24.04, 8 GB of RAM, with a public IP address.
+  `$SIM_HOME` there is `$HOME/.devops-sim`.
+- GitHub Codespaces (2-core, 8 GB, browser only) is the fallback environment. Local WSL2 Ubuntu
+  stays supported, so changes must work in all three.
+- Because the VPS has a public IP address, every published port is bound to `127.0.0.1`
+  (for example `"127.0.0.1:8080:80"`). No port may listen on `0.0.0.0`.
+- In Codespaces, the budget is $0: GitHub Free quota only (120 core-hours and 15 GB-months of
+  storage).
 - No dependency on Windows. `powershell.exe` in `sim focus` is optional and must keep its
   terminal fallback. Do not add `/mnt/c` or paths such as `~/devops-sim`.
 - Use paths relative to the repository root.
@@ -22,25 +27,27 @@ company. Claude builds the simulation environment. The human does the DevOps tic
 
 - Never build the dev container or run the devcontainer CLI inside a codespace. It is tested
   only through **Rebuild Container**.
-- Before building Docker images, check `df -h /workspaces`. Stop and ask if less than 5 GB is free.
+- Before building Docker images, check free space with `df -h "$HOME"` on the VPS or WSL, and
+  `df -h /workspaces` in Codespaces. Stop and ask if less than 5 GB is free.
 - Prod plus infra must stay under 5 GB of RAM.
 
 ## Simulation data
 
-- Simulation data lives only in `$SIM_HOME`. In Codespaces that is `/workspaces/.devops-sim`;
-  in WSL it defaults to `~/.devops-sim`. In Codespaces, only `/workspaces` survives a rebuild.
+- Simulation data lives only in `$SIM_HOME`. On the VPS that is `$HOME/.devops-sim`; in
+  Codespaces it is `/workspaces/.devops-sim`; in WSL it defaults to `~/.devops-sim`. In
+  Codespaces, only `/workspaces` survives a rebuild.
 - Test `sim` and `chaos` only with a temporary `SIM_HOME` under `/tmp`. Never run them against
   the real `$SIM_HOME`, and never run `sim init`: the human does that on the start day.
-- The bastion public key comes from `SIM_SSH_PUBKEY`. In Codespaces that is
+- The bastion public key comes from `SIM_SSH_PUBKEY`. On the VPS and in Codespaces that is
   `$SIM_HOME/ssh/id_ed25519.pub`; in WSL it defaults to `~/.ssh/id_ed25519.pub`.
 
 ## Staging, bastion, legacy-vm-01 and chaos
 
 Current state:
 
-- Compose projects: `finsim-prod` (port 8080), `finsim-staging` (port 8081, off by default) and
-  `finsim-infra` (`bastion` on `127.0.0.1:2223`, and `legacy-vm-01` with no host port). Port 2222
-  belongs to the Codespaces SSH server, so do not use it.
+- Compose projects: `finsim-prod` (`127.0.0.1:8080`), `finsim-staging` (`127.0.0.1:8081`, off by
+  default) and `finsim-infra` (`bastion` on `127.0.0.1:2223`, and `legacy-vm-01` with no host
+  port). Port 2222 belongs to the Codespaces SSH server, so do not use it.
 - `legacy-vm-01` joins the `finsim-prod_default` network, so prod must be up before `make infra-up`.
 - They keep their state in `$SIM_HOME` and use the key `$SIM_HOME/ssh/id_ed25519`. `$SIM_HOME` also
   holds stable host keys (`hostkeys/`), `ssh/known_hosts`, the `ops-admin` password
