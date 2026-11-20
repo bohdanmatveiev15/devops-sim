@@ -18,11 +18,11 @@
 
 | what | value | note |
 | --- | --- | --- |
-| RAM, prod + infra | 202 MiB | limit: 5 GB | 
-| RAM, staging | 117 MiB | - |
-| free disk on /workspaces | 6.1 GB | - |
+| RAM, prod + infra | 136 MiB | limit: 5 GB | 
+| RAM, staging | 122 MiB | - |
+| free disk on $HOME | 141 GB | - |
 
-Measured on 2026-11-11, with prod, infra and staging running.
+Measured on 2026-11-20, on the VPS, with prod, infra and staging running.
 
 ## Open questions
 
