@@ -1,6 +1,6 @@
 # FinSim simulation state
 
-Updated at the end of sprint 1 (simulation day 5, Friday 2026-11-20; real date 2026-11-25).
+Updated at the end of sprint 1 (simulation day 5, Friday 2026-11-20; real date 2026-11-25), after #15 and the retro.
 
 ## Where we are
 
@@ -23,17 +23,20 @@ Updated at the end of sprint 1 (simulation day 5, Friday 2026-11-20; real date 2
 - #6 (PR #11): docs/runbooks/access-and-environments.md.
 - #12: ports confirmed not exposed on the public IP.
 - #14: legacy-reports discovery.
+- #15: settings.ini permissions changed to 600 (root only), with temporary ops-admin access (approved, used about 15 minutes, returned).
+- #16 (PR #17): sprint 1 brag entry and this file.
 
 ## Known facts about legacy-reports (legacy-vm-01)
 
 - /etc/cron.d/legacy-reports runs /opt/reports/bin/generate_report.py (Python 3) every 5 minutes as root.
 - It reads the payments table (status, amount, created_at; last 24 hours, grouped by status).
 - Output: /opt/reports/out (288 files per day, no cleanup). Logs: /var/log/legacy-reports/reports.log and cron.out (no rotation).
-- Risks: the config /opt/reports/etc/settings.ini with the DB password is world-readable; failures are not monitored; a change of the three columns breaks the reports (Lukas added this to the migration plan).
+- Fixed: /opt/reports/etc/settings.ini (with the DB password) is now -rw------- root:root (#15). The cron job still works as root.
+- Open risks: the DB password was world-readable for weeks and is not rotated yet; failures are not monitored; a change of the three columns breaks the reports (Lukas added this to the migration plan).
 
 ## Open work
 
-- To do: "Restrict access to the legacy-reports config with the DB password" (Sam's request, type:change, needs an access request).
+- Sam will create a follow-up ticket: rotate the legacy-reports DB password (it was exposed).
 - Backlog: #13 spike, should staging stay on by default on the VPS.
 - Ideas for later: cleanup or rotation of reports and logs, an alert when no new report appears, running the cron job as a non-root user.
 
@@ -45,6 +48,14 @@ Updated at the end of sprint 1 (simulation day 5, Friday 2026-11-20; real date 2
 - Never paste secrets or the public IP into GitHub or chat; write <public-ip>.
 - Brag: every Friday the Tech Lead drafts the entry from closed tickets; Bohdan checks the facts (about 5 minutes).
 - Session length: 45 minutes to 3 hours; short sessions on tired days are fine.
+- Access: admin rights only through an access request in the ticket (what, why, how long, limits), approved by the Tech Lead; use ops-admin for the approved window and write when you left.
+
+## Changes for sprint 2 (from the sprint 1 retro)
+
+- More hands-on terminal work, less writing.
+- Every ticket has a comment template with blanks (Before / Change / After / Proof).
+- One review round for comments: only missing proof, wrong facts or secrets block a ticket.
+- English corrections: only the 2-3 most useful ones per message.
 
 ## Skills map (0-3)
 
